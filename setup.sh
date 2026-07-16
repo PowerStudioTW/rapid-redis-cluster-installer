@@ -408,10 +408,15 @@ Helper commands:
   redis-cli --cluster create ${announce_ip}:7000 ${announce_ip}:7001 ${announce_ip}:7002 ${announce_ip}:7003 --cluster-replicas 0
 
   # Add these 4 nodes to an existing cluster
-  redis-cli --cluster add-node ${announce_ip}:7000 <existing-cluster-ip>:7000
-  redis-cli --cluster add-node ${announce_ip}:7001 <existing-cluster-ip>:7000
-  redis-cli --cluster add-node ${announce_ip}:7002 <existing-cluster-ip>:7000
-  redis-cli --cluster add-node ${announce_ip}:7003 <existing-cluster-ip>:7000
+  EXISTING_CLUSTER_IP="<existing-cluster-ip>"
+  ADD_NODE_DELAY_SECONDS=5
+  for PORT in 7000 7001 7002 7003; do
+    if ! redis-cli --cluster add-node ${announce_ip}:\${PORT} "\${EXISTING_CLUSTER_IP}:7000"; then
+      echo "Failed to add ${announce_ip}:\${PORT}; stopping."
+      break
+    fi
+    [[ "\${PORT}" == "7003" ]] || sleep "\${ADD_NODE_DELAY_SECONDS}"
+  done
 
   # Rebalance quickly after adding empty masters
   redis-cli --cluster rebalance <existing-cluster-ip>:7000 --cluster-use-empty-masters --cluster-threshold 1

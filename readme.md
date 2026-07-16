@@ -92,11 +92,18 @@ redis-cli --cluster create "$VM_PRIVATE_IP":7000 "$VM_PRIVATE_IP":7001 "$VM_PRIV
 ```bash
 VM_PRIVATE_IP="$(awk '$1 == "cluster-announce-ip" {print $2; exit}' /etc/redis/redis-7000.conf)"
 EXISTING_CLUSTER_IP="<existing-cluster-ip>"
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7000 "$EXISTING_CLUSTER_IP":7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7001 "$EXISTING_CLUSTER_IP":7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7002 "$EXISTING_CLUSTER_IP":7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7003 "$EXISTING_CLUSTER_IP":7000
+ADD_NODE_DELAY_SECONDS=5
+
+for PORT in 7000 7001 7002 7003; do
+  if ! redis-cli --cluster add-node "$VM_PRIVATE_IP:$PORT" "$EXISTING_CLUSTER_IP:7000"; then
+    echo "Failed to add $VM_PRIVATE_IP:$PORT; stopping."
+    break
+  fi
+  [[ "$PORT" == "7003" ]] || sleep "$ADD_NODE_DELAY_SECONDS"
+done
 ```
+
+每個 node 加入成功後會等待 5 秒再處理下一個。需要更長時間時可調高 `ADD_NODE_DELAY_SECONDS`。
 
 快速 rebalance 空 master：
 
