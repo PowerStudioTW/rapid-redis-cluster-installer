@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 REDIS_VERSION="${REDIS_VERSION:-6:8.8.0-1rl1~noble1}"
 PORTS=(7000 7001 7002 7003)
-DEFAULT_RAW_BASE_URL=""
+DEFAULT_RAW_BASE_URL="https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master"
 RAW_BASE_URL="${REDIS_CLUSTER_RAW_BASE:-$DEFAULT_RAW_BASE_URL}"
 
 log() {
@@ -21,8 +21,7 @@ Usage:
   sudo bash setup.sh <vm-private-ip>
 
 Remote GitHub raw install:
-  RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"
-  curl -fsSL "$RAW_BASE/setup.sh" | sudo env REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash -s -- <vm-private-ip>
+  curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash -s -- <vm-private-ip>
 
 Optional environment variables:
   PRIVATE_CIDR=<custom-private-cidr>
@@ -90,7 +89,7 @@ install_prerequisites() {
   export DEBIAN_FRONTEND=noninteractive
 
   apt-get update
-  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony
+  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop
 }
 
 configure_redis_apt_repo() {
@@ -241,12 +240,16 @@ prepare_source_tree() {
   local script_dir tmp_dir file
 
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)"
-  if [[ -n "${script_dir}" && -d "${script_dir}/scripts/etc/redis" && -d "${script_dir}/scripts/etc/systemd/system" ]]; then
-    printf '%s\n' "${script_dir}/scripts/etc"
+  if [[ -n "${script_dir}" \
+    && -d "${script_dir}/scripts/etc/redis" \
+    && -d "${script_dir}/scripts/etc/systemd/system" \
+    && -f "${script_dir}/scripts/root/.bashrc" \
+    && -f "${script_dir}/scripts/~/.config/htop/htoprc" ]]; then
+    printf '%s\n' "${script_dir}/scripts"
     return
   fi
 
-  [[ -n "${RAW_BASE_URL}" ]] || die "Cannot find local scripts/. For remote install, set REDIS_CLUSTER_RAW_BASE to the GitHub raw base URL."
+  [[ -n "${RAW_BASE_URL}" ]] || die "Cannot find local scripts/. Set REDIS_CLUSTER_RAW_BASE to the GitHub raw base URL."
 
   tmp_dir="$(mktemp -d)"
   RAW_BASE_URL="${RAW_BASE_URL%/}"
@@ -260,23 +263,26 @@ prepare_source_tree() {
     scripts/etc/systemd/system/redis-7000.service \
     scripts/etc/systemd/system/redis-7001.service \
     scripts/etc/systemd/system/redis-7002.service \
-    scripts/etc/systemd/system/redis-7003.service; do
+    scripts/etc/systemd/system/redis-7003.service \
+    scripts/root/.bashrc \
+    scripts/~/.config/htop/htoprc; do
     mkdir -p "${tmp_dir}/$(dirname "${file}")"
-    curl -fsSL "${RAW_BASE_URL}/${file}" -o "${tmp_dir}/${file}"
+    curl -fsSL "${RAW_BASE_URL}/${file}" -o "${tmp_dir}/${file}" \
+      || die "Failed to download ${RAW_BASE_URL}/${file}"
   done
 
-  printf '%s\n' "${tmp_dir}/scripts/etc"
+  printf '%s\n' "${tmp_dir}/scripts"
 }
 
 install_redis_node_files() {
   local announce_ip="$1"
-  local source_etc="$2"
+  local source_tree="$2"
   local work_dir port conf service
 
   log "Installing Redis node configs and systemd units."
   work_dir="$(mktemp -d)"
-  cp -a "${source_etc}/redis" "${work_dir}/redis"
-  cp -a "${source_etc}/systemd" "${work_dir}/systemd"
+  cp -a "${source_tree}/etc/redis" "${work_dir}/redis"
+  cp -a "${source_tree}/etc/systemd" "${work_dir}/systemd"
 
   install -d -m 0755 /etc/redis
 
@@ -295,6 +301,30 @@ install_redis_node_files() {
     install -m 0644 -o root -g root "${conf}" "/etc/redis/redis-${port}.conf"
     install -m 0644 -o root -g root "${service}" "/etc/systemd/system/redis-${port}.service"
   done
+}
+
+install_shell_and_htop_files() {
+  local source_tree="$1"
+  local target_user target_group target_home root_bashrc htoprc
+
+  root_bashrc="${source_tree}/root/.bashrc"
+  htoprc="${source_tree}/~/.config/htop/htoprc"
+
+  [[ -f "${root_bashrc}" ]] || die "Missing ${root_bashrc}"
+  [[ -f "${htoprc}" ]] || die "Missing ${htoprc}"
+
+  target_user="${SUDO_USER:-${USER:-root}}"
+  if ! getent passwd "${target_user}" >/dev/null; then
+    target_user="root"
+  fi
+  target_group="$(id -gn "${target_user}")"
+  target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
+
+  log "Installing /root/.bashrc and htop config for ${target_user}."
+  install -m 0644 -o root -g root "${root_bashrc}" /root/.bashrc
+  install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config"
+  install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config/htop"
+  install -m 0644 -o "${target_user}" -g "${target_group}" "${htoprc}" "${target_home}/.config/htop/htoprc"
 }
 
 check_redis_modules() {
@@ -369,7 +399,7 @@ schedule_reboot() {
 }
 
 main() {
-  local announce_ip private_cidr source_etc
+  local announce_ip private_cidr source_tree
 
   if [[ $# -ne 1 ]]; then
     usage
@@ -393,9 +423,10 @@ main() {
   configure_needrestart_and_timers
   configure_time_and_shell_helpers
 
-  source_etc="$(prepare_source_tree)"
+  source_tree="$(prepare_source_tree)"
   check_redis_modules
-  install_redis_node_files "${announce_ip}" "${source_etc}"
+  install_redis_node_files "${announce_ip}" "${source_tree}"
+  install_shell_and_htop_files "${source_tree}"
   start_redis_nodes
   print_helpers "${announce_ip}"
   schedule_reboot

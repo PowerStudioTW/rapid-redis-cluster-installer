@@ -1,63 +1,65 @@
-# Redis Cluster 8.8.0 安裝
+# Redis Cluster 8.8.0 一行安裝
 
-這個 repo 會在一台 VM 上安裝 Redis `8.8.0`，鎖定 APT 版本，並啟動 4 個 Redis Cluster node：
+在新的 VM 上執行一行指令，即可安裝 Redis `8.8.0`、鎖定 APT 版本，並啟動 4 個 Redis Cluster node：
 
 - `7000`
 - `7001`
 - `7002`
 - `7003`
 
-`cluster-announce-ip` 必須使用該 VM 的內網 IP。安裝指令沒有帶 IP、IP 不是 RFC1918 內網 IP、或該 IP 不在本機網卡上，`setup.sh` 會直接停止。
+安裝完成後只會準備好 Redis node，不會自動建立 cluster，也不會自動加入既有 cluster；可以確認服務正常後再執行本文後面的 cluster 指令。
 
-## 本機安裝
+## VM 一行安裝
+
+需求：Ubuntu 24.04、可使用 `sudo`、可連線至 GitHub 與 Redis APT repository。
+
+把下方的 `10.0.0.10` 換成該 VM 的內網 IP，然後整行執行：
 
 ```bash
-VM_PRIVATE_IP="<vm-private-ip>"
-sudo bash setup.sh "$VM_PRIVATE_IP"
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash -s -- 10.0.0.10
 ```
 
-## GitHub raw 遠端安裝
+`cluster-announce-ip` 會使用指令最後面的 VM 內網 IP。沒有帶 IP、IP 不是 RFC1918 內網 IP，或該 IP 不在本機網卡上時，`setup.sh` 會直接停止。
 
-上傳到 GitHub 後，使用 raw URL 的 base path：
+預設會從 VM 內網 IP 自動推導出 `a.b.c.0/24`，並允許該網段連線 Redis cluster。安裝完成後會排程在 1 分鐘後重開機。
+
+## 可選設定
+
+如果內網不是 `/24`，可以在同一行指定允許的來源網段：
 
 ```bash
-RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"
-VM_PRIVATE_IP="<vm-private-ip>"
-curl -fsSL "$RAW_BASE/setup.sh" | sudo env REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash -s -- "$VM_PRIVATE_IP"
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env PRIVATE_CIDR="10.0.0.0/16" bash -s -- 10.0.0.10
 ```
 
-預設會從 `VM_PRIVATE_IP` 自動推導出 `a.b.c.0/24`，並允許該網段連線 Redis cluster。
-如果內網不是 `/24`，可以指定允許的來源網段：
+不希望安裝後自動重開機：
 
 ```bash
-RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"
-VM_PRIVATE_IP="<vm-private-ip>"
-PRIVATE_CIDR="<custom-private-cidr>"
-curl -fsSL "$RAW_BASE/setup.sh" | sudo env PRIVATE_CIDR="$PRIVATE_CIDR" REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash -s -- "$VM_PRIVATE_IP"
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env SKIP_REBOOT=1 bash -s -- 10.0.0.10
 ```
 
-測試安裝但不重開機：
+`REDIS_CLUSTER_RAW_BASE` 是進階覆寫參數。遠端執行時，`setup.sh` 還需要下載 repo 內的 Redis config 與 systemd unit；這個參數用來指定那些檔案的 GitHub Raw base URL。官方 repo URL 已經內建在腳本中，正常安裝不需要設定它。只有從 fork、其他 branch 或測試來源安裝時才需要覆寫：
 
 ```bash
-VM_PRIVATE_IP="<vm-private-ip>"
-sudo SKIP_REBOOT=1 bash setup.sh "$VM_PRIVATE_IP"
+RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"; curl -fsSL "$RAW_BASE/setup.sh" | sudo env REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash -s -- 10.0.0.10
 ```
 
 額外允許可信任來源 IP 可以安裝後自行新增：
 
 ```bash
-sudo ufw allow from <trusted-admin-ip>
-sudo ufw allow from <trusted-office-cidr>
+sudo ufw allow from <trusted-ip>
 ```
 
 ## 安裝內容
 
 `setup.sh` 會執行：
 
+- 安裝必要工具，包括 `curl`、`ufw`、`chrony`、`htop`
 - 安裝 Redis `6:8.8.0-1rl1~noble1`，並 `apt-mark hold redis redis-server redis-tools`
 - 停用並 mask 預設 `redis-server`
 - 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
 - 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
+- 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
+- 將 `scripts/~/.config/htop/htoprc` 安裝到執行安裝指令的使用者家目錄
 - 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成指令輸入的 VM 內網 IP
 - 啟動 `redis-7000` 到 `redis-7003`
 - 設定 THP、UFW、sysctl、chrony、logrotate timer、apt daily timer、needrestart
@@ -72,7 +74,7 @@ systemctl status redis-7000 redis-7001 redis-7002 redis-7003 --no-pager
 redis-cli -p 7000 cluster nodes
 ```
 
-在單台 VM 建立 4 master cluster：
+安裝後若要在單台 VM 建立 4 master cluster：
 
 ```bash
 VM_PRIVATE_IP="<vm-private-ip>"
