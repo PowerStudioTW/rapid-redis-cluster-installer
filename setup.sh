@@ -18,10 +18,12 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  sudo bash setup.sh <vm-private-ip>
+  sudo bash setup.sh [vm-private-ip]
 
 Remote GitHub raw install:
-  curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash -s -- <vm-private-ip>
+  curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash
+
+The VM private IP is detected automatically. Pass [vm-private-ip] only to override it.
 
 Optional environment variables:
   PRIVATE_CIDR=<custom-private-cidr>
@@ -33,7 +35,7 @@ EOF
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "Please run as root, for example: sudo bash setup.sh <vm-private-ip>"
+    die "Please run as root, for example: sudo bash setup.sh"
   fi
 }
 
@@ -62,6 +64,41 @@ validate_private_ipv4() {
   fi
 
   return 1
+}
+
+detect_private_ipv4() {
+  local route_ip candidate
+  local -a candidates=()
+
+  command -v ip >/dev/null 2>&1 || die "Cannot detect the VM private IP because the ip command is not available. Pass the private IP explicitly."
+
+  route_ip="$(
+    ip -4 route get 1.1.1.1 2>/dev/null \
+      | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}' \
+      || true
+  )"
+  if [[ -n "${route_ip}" ]] && validate_private_ipv4 "${route_ip}"; then
+    printf '%s\n' "${route_ip}"
+    return
+  fi
+
+  while IFS= read -r candidate; do
+    validate_private_ipv4 "${candidate}" || continue
+    if [[ " ${candidates[*]:-} " != *" ${candidate} "* ]]; then
+      candidates+=("${candidate}")
+    fi
+  done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+
+  if ((${#candidates[@]} == 1)); then
+    printf '%s\n' "${candidates[0]}"
+    return
+  fi
+
+  if ((${#candidates[@]} == 0)); then
+    die "Cannot detect an RFC1918 private IPv4 address. Pass it explicitly: sudo bash setup.sh <vm-private-ip>"
+  fi
+
+  die "Multiple private IPv4 addresses detected (${candidates[*]}). Pass the correct one explicitly: sudo bash setup.sh <vm-private-ip>"
 }
 
 derive_cidr24() {
@@ -401,15 +438,22 @@ schedule_reboot() {
 main() {
   local announce_ip private_cidr source_tree
 
-  if [[ $# -ne 1 ]]; then
+  if [[ $# -gt 1 ]]; then
     usage
     exit 1
   fi
 
-  announce_ip="$1"
+  require_root
+
+  if [[ $# -eq 1 ]]; then
+    announce_ip="$1"
+    log "Using explicitly provided VM private IP: ${announce_ip}"
+  else
+    announce_ip="$(detect_private_ipv4)"
+    log "Detected VM private IP: ${announce_ip}"
+  fi
   validate_private_ipv4 "${announce_ip}" || die "Please provide a valid RFC1918 private IPv4 address."
 
-  require_root
   check_ip_bound_to_host "${announce_ip}"
 
   private_cidr="${PRIVATE_CIDR:-$(derive_cidr24 "${announce_ip}")}"

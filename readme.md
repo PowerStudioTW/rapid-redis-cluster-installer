@@ -13,13 +13,19 @@
 
 需求：Ubuntu 24.04、可使用 `sudo`、可連線至 GitHub 與 Redis APT repository。
 
-把下方的 `10.0.0.10` 換成該 VM 的內網 IP，然後整行執行：
+直接執行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash
+```
+
+`setup.sh` 會優先取得預設路由使用的 RFC1918 內網 IP；若沒有預設路由來源，則在本機只有一個內網 IP 時使用該 IP。偵測成功後，會把安裝至 `/etc/redis/redis-7000.conf`～`redis-7003.conf` 的 `cluster-announce-ip` 全部改成該 IP。
+
+如果 VM 有多個內網 IP 且無法安全判斷，安裝會停止。此時可在指令最後手動指定：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash -s -- 10.0.0.10
 ```
-
-`cluster-announce-ip` 會使用指令最後面的 VM 內網 IP。沒有帶 IP、IP 不是 RFC1918 內網 IP，或該 IP 不在本機網卡上時，`setup.sh` 會直接停止。
 
 預設會從 VM 內網 IP 自動推導出 `a.b.c.0/24`，並允許該網段連線 Redis cluster。安裝完成後會排程在 1 分鐘後重開機。
 
@@ -28,19 +34,19 @@ curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-i
 如果內網不是 `/24`，可以在同一行指定允許的來源網段：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env PRIVATE_CIDR="10.0.0.0/16" bash -s -- 10.0.0.10
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env PRIVATE_CIDR="10.0.0.0/16" bash
 ```
 
 不希望安裝後自動重開機：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env SKIP_REBOOT=1 bash -s -- 10.0.0.10
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env SKIP_REBOOT=1 bash
 ```
 
 `REDIS_CLUSTER_RAW_BASE` 是進階覆寫參數。遠端執行時，`setup.sh` 還需要下載 repo 內的 Redis config 與 systemd unit；這個參數用來指定那些檔案的 GitHub Raw base URL。官方 repo URL 已經內建在腳本中，正常安裝不需要設定它。只有從 fork、其他 branch 或測試來源安裝時才需要覆寫：
 
 ```bash
-RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"; curl -fsSL "$RAW_BASE/setup.sh" | sudo env REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash -s -- 10.0.0.10
+RAW_BASE="https://raw.githubusercontent.com/<owner>/<repo>/<branch>"; curl -fsSL "$RAW_BASE/setup.sh" | sudo env REDIS_CLUSTER_RAW_BASE="$RAW_BASE" bash
 ```
 
 額外允許可信任來源 IP 可以安裝後自行新增：
@@ -60,7 +66,7 @@ sudo ufw allow from <trusted-ip>
 - 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
 - 將 `scripts/~/.config/htop/htoprc` 安裝到執行安裝指令的使用者家目錄
-- 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成指令輸入的 VM 內網 IP
+- 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
 - 啟動 `redis-7000` 到 `redis-7003`
 - 設定 THP、UFW、sysctl、chrony、logrotate timer、apt daily timer、needrestart
 - 完成後列出 helper 指令，並排程 1 分鐘後重開機
@@ -77,18 +83,19 @@ redis-cli -p 7000 cluster nodes
 安裝後若要在單台 VM 建立 4 master cluster：
 
 ```bash
-VM_PRIVATE_IP="<vm-private-ip>"
+VM_PRIVATE_IP="$(awk '$1 == "cluster-announce-ip" {print $2; exit}' /etc/redis/redis-7000.conf)"
 redis-cli --cluster create "$VM_PRIVATE_IP":7000 "$VM_PRIVATE_IP":7001 "$VM_PRIVATE_IP":7002 "$VM_PRIVATE_IP":7003 --cluster-replicas 0
 ```
 
-加入既有 Redis Cluster：
+加入既有 Redis Cluster。`VM_PRIVATE_IP` 會從本機 Redis config 自動取得；只需要填寫既有 cluster 其中一台 node 的 IP：
 
 ```bash
-VM_PRIVATE_IP="<vm-private-ip>"
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7000 <existing-cluster-ip>:7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7001 <existing-cluster-ip>:7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7002 <existing-cluster-ip>:7000
-redis-cli --cluster add-node "$VM_PRIVATE_IP":7003 <existing-cluster-ip>:7000
+VM_PRIVATE_IP="$(awk '$1 == "cluster-announce-ip" {print $2; exit}' /etc/redis/redis-7000.conf)"
+EXISTING_CLUSTER_IP="<existing-cluster-ip>"
+redis-cli --cluster add-node "$VM_PRIVATE_IP":7000 "$EXISTING_CLUSTER_IP":7000
+redis-cli --cluster add-node "$VM_PRIVATE_IP":7001 "$EXISTING_CLUSTER_IP":7000
+redis-cli --cluster add-node "$VM_PRIVATE_IP":7002 "$EXISTING_CLUSTER_IP":7000
+redis-cli --cluster add-node "$VM_PRIVATE_IP":7003 "$EXISTING_CLUSTER_IP":7000
 ```
 
 快速 rebalance 空 master：
