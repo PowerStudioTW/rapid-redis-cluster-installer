@@ -409,7 +409,7 @@ Helper commands:
 
   # Add these 4 nodes to an existing cluster
   EXISTING_CLUSTER_IP="<existing-cluster-ip>"
-  ADD_NODE_DELAY_SECONDS=5
+  ADD_NODE_DELAY_SECONDS=3
   for PORT in 7000 7001 7002 7003; do
     if ! redis-cli --cluster add-node ${announce_ip}:\${PORT} "\${EXISTING_CLUSTER_IP}:7000"; then
       echo "Failed to add ${announce_ip}:\${PORT}; stopping."

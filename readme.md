@@ -92,7 +92,7 @@ redis-cli --cluster create "$VM_PRIVATE_IP":7000 "$VM_PRIVATE_IP":7001 "$VM_PRIV
 ```bash
 VM_PRIVATE_IP="$(awk '$1 == "cluster-announce-ip" {print $2; exit}' /etc/redis/redis-7000.conf)"
 EXISTING_CLUSTER_IP="<existing-cluster-ip>"
-ADD_NODE_DELAY_SECONDS=5
+ADD_NODE_DELAY_SECONDS=3
 
 for PORT in 7000 7001 7002 7003; do
   if ! redis-cli --cluster add-node "$VM_PRIVATE_IP:$PORT" "$EXISTING_CLUSTER_IP:7000"; then
