@@ -65,7 +65,9 @@ sudo ufw allow from <trusted-ip>
 - 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
 - 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
-- 將 `scripts/~/.config/htop/htoprc` 安裝到執行安裝指令的使用者家目錄
+- 將 `scripts/~/.config/htop/htoprc` 安裝到 `/root/.config/htop/htoprc`
+- 若透過 `sudo` 執行，再將 `htoprc` 複製到原登入使用者的家目錄
+- 複製完成後比對 `.bashrc` 與 `htoprc` 內容，驗證失敗會停止安裝
 - 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
 - 啟動 `redis-7000` 到 `redis-7003`
 - 設定 THP、UFW、sysctl、chrony、logrotate timer、apt daily timer、needrestart

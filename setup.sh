@@ -357,11 +357,25 @@ install_shell_and_htop_files() {
   target_group="$(id -gn "${target_user}")"
   target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
 
-  log "Installing /root/.bashrc and htop config for ${target_user}."
+  log "Installing root shell and htop configuration files."
   install -m 0644 -o root -g root "${root_bashrc}" /root/.bashrc
-  install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config"
-  install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config/htop"
-  install -m 0644 -o "${target_user}" -g "${target_group}" "${htoprc}" "${target_home}/.config/htop/htoprc"
+  install -d -m 0755 -o root -g root /root/.config
+  install -d -m 0755 -o root -g root /root/.config/htop
+  install -m 0644 -o root -g root "${htoprc}" /root/.config/htop/htoprc
+
+  cmp -s "${root_bashrc}" /root/.bashrc || die "Failed to verify /root/.bashrc"
+  cmp -s "${htoprc}" /root/.config/htop/htoprc || die "Failed to verify /root/.config/htop/htoprc"
+
+  if [[ "${target_user}" != "root" ]]; then
+    log "Installing htop config for sudo user ${target_user} at ${target_home}/.config/htop/htoprc."
+    install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config"
+    install -d -m 0755 -o "${target_user}" -g "${target_group}" "${target_home}/.config/htop"
+    install -m 0644 -o "${target_user}" -g "${target_group}" "${htoprc}" "${target_home}/.config/htop/htoprc"
+    cmp -s "${htoprc}" "${target_home}/.config/htop/htoprc" \
+      || die "Failed to verify ${target_home}/.config/htop/htoprc"
+  fi
+
+  log "Verified /root/.bashrc and /root/.config/htop/htoprc."
 }
 
 check_redis_modules() {
@@ -436,8 +450,8 @@ schedule_reboot() {
     return
   fi
 
-  log "Setup complete. Rebooting in 1 minute."
-  shutdown -r +1 "Redis cluster setup completed; rebooting to apply kernel/runtime settings."
+  log "Setup complete. Rebooting in 30 seconds."
+  systemctl reboot --when="+30s"
 }
 
 main() {
@@ -473,9 +487,9 @@ main() {
   configure_time_and_shell_helpers
 
   source_tree="$(prepare_source_tree)"
+  install_shell_and_htop_files "${source_tree}"
   check_redis_modules
   install_redis_node_files "${announce_ip}" "${source_tree}"
-  install_shell_and_htop_files "${source_tree}"
   start_redis_nodes
   print_helpers "${announce_ip}"
   schedule_reboot
