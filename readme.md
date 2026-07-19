@@ -1,6 +1,6 @@
 # Redis Cluster 8.8.0 一行安裝
 
-在新的 VM 上執行一行指令，即可安裝 Redis `8.8.0`、鎖定 APT 版本，並啟動 4 個 Redis Cluster node：
+在新的 VM 上執行一行指令，即可安裝 Redis `8.8.0`、鎖定 APT 版本，並啟動最多 4 個 Redis Cluster node（預設 4 個，可用 `NODE_COUNT` 指定 1～4 個，port 從 `7000` 開始連號）：
 
 - `7000`
 - `7001`
@@ -19,7 +19,7 @@
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash
 ```
 
-`setup.sh` 會優先取得預設路由使用的 RFC1918 內網 IP；若沒有預設路由來源，則在本機只有一個內網 IP 時使用該 IP。偵測成功後，會把安裝至 `/etc/redis/redis-7000.conf`～`redis-7003.conf` 的 `cluster-announce-ip` 全部改成該 IP。
+`setup.sh` 會優先取得預設路由使用的 RFC1918 內網 IP；若沒有預設路由來源，則在本機只有一個內網 IP 時使用該 IP。偵測成功後，會把安裝的 `/etc/redis/redis-7000.conf`～`redis-7003.conf`（依 `NODE_COUNT` 而定）的 `cluster-announce-ip` 全部改成該 IP。
 
 如果 VM 有多個內網 IP 且無法安全判斷，安裝會停止。此時可在指令最後手動指定：
 
@@ -30,6 +30,14 @@ curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-i
 預設會從 VM 內網 IP 自動推導出 `a.b.c.0/24`，並允許該網段連線 Redis cluster。安裝完成後會排程在 1 分鐘後重開機。
 
 ## 可選設定
+
+預設安裝 4 個 node（`7000`～`7003`）。如果這台 VM 只需要部分 node，可用 `NODE_COUNT` 指定數量（1～4），port 一律從 `7000` 開始連號。例如只裝 2 個 node（`7000`、`7001`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env NODE_COUNT=2 bash
+```
+
+UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NODE_COUNT=2` 時只開 `7000:7001` 與 `17000:17001`）。
 
 如果內網不是 `/24`，可以在同一行指定允許的來源網段：
 
@@ -62,18 +70,20 @@ sudo ufw allow from <trusted-ip>
 - 安裝必要工具，包括 `curl`、`ufw`、`chrony`、`htop`
 - 安裝 Redis `6:8.8.0-1rl1~noble1`，並 `apt-mark hold redis redis-server redis-tools`
 - 停用並 mask 預設 `redis-server`
-- 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
-- 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
+- 依 `NODE_COUNT` 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
+- 依 `NODE_COUNT` 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
 - 將 `scripts/~/.config/htop/htoprc` 安裝到 `/root/.config/htop/htoprc`
 - 若透過 `sudo` 執行，再將 `htoprc` 複製到原登入使用者的家目錄
 - 複製完成後比對 `.bashrc` 與 `htoprc` 內容，驗證失敗會停止安裝
 - 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
-- 啟動 `redis-7000` 到 `redis-7003`
+- 啟動 `redis-7000` 起連號的 node（預設到 `redis-7003`）
 - 設定 THP、UFW、sysctl、chrony、logrotate timer、apt daily timer、needrestart
 - 完成後列出 helper 指令，並排程 1 分鐘後重開機
 
 ## Helper 指令
+
+以下指令以預設的 4 個 node 為例；若安裝時有指定 `NODE_COUNT`，請把 port 清單改成實際安裝的 port（安裝完成時畫面上也會列出對應的指令）。
 
 檢查本機 Redis node：
 

@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 
 REDIS_VERSION="${REDIS_VERSION:-6:8.8.0-1rl1~noble1}"
-PORTS=(7000 7001 7002 7003)
+NODE_COUNT="${NODE_COUNT:-4}"
+BASE_PORT=7000
+PORTS=()
 DEFAULT_RAW_BASE_URL="https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master"
 RAW_BASE_URL="${REDIS_CLUSTER_RAW_BASE:-$DEFAULT_RAW_BASE_URL}"
 
@@ -26,6 +28,7 @@ Remote GitHub raw install:
 The VM private IP is detected automatically. Pass [vm-private-ip] only to override it.
 
 Optional environment variables:
+  NODE_COUNT=<1-4>            (default 4; installs nodes on ports 7000..700N)
   PRIVATE_CIDR=<custom-private-cidr>
   REDIS_VERSION=6:8.8.0-1rl1~noble1
   SKIP_REBOOT=1
@@ -197,12 +200,23 @@ EOF
 
 configure_firewall() {
   local private_cidr="$1"
+  local first_port="${PORTS[0]}"
+  local last_port="${PORTS[-1]}"
+  local redis_ports bus_ports
+
+  if [[ "${first_port}" == "${last_port}" ]]; then
+    redis_ports="${first_port}"
+    bus_ports="$((first_port + 10000))"
+  else
+    redis_ports="${first_port}:${last_port}"
+    bus_ports="$((first_port + 10000)):$((last_port + 10000))"
+  fi
 
   log "Configuring UFW for SSH and Redis cluster traffic from ${private_cidr}."
   ufw allow ssh
   ufw allow from "${private_cidr}"
-  ufw allow from "${private_cidr}" to any port 7000:7003 proto tcp
-  ufw allow from "${private_cidr}" to any port 17000:17003 proto tcp
+  ufw allow from "${private_cidr}" to any port "${redis_ports}" proto tcp
+  ufw allow from "${private_cidr}" to any port "${bus_ports}" proto tcp
   ufw --force enable
 }
 
@@ -274,7 +288,8 @@ configure_time_and_shell_helpers() {
 }
 
 prepare_source_tree() {
-  local script_dir tmp_dir file
+  local script_dir tmp_dir file port
+  local -a files=()
 
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)"
   if [[ -n "${script_dir}" \
@@ -292,17 +307,18 @@ prepare_source_tree() {
   RAW_BASE_URL="${RAW_BASE_URL%/}"
   log "Downloading scripts/ from ${RAW_BASE_URL}."
 
-  for file in \
-    scripts/etc/redis/redis-7000.conf \
-    scripts/etc/redis/redis-7001.conf \
-    scripts/etc/redis/redis-7002.conf \
-    scripts/etc/redis/redis-7003.conf \
-    scripts/etc/systemd/system/redis-7000.service \
-    scripts/etc/systemd/system/redis-7001.service \
-    scripts/etc/systemd/system/redis-7002.service \
-    scripts/etc/systemd/system/redis-7003.service \
-    scripts/root/.bashrc \
-    scripts/~/.config/htop/htoprc; do
+  for port in "${PORTS[@]}"; do
+    files+=(
+      "scripts/etc/redis/redis-${port}.conf"
+      "scripts/etc/systemd/system/redis-${port}.service"
+    )
+  done
+  files+=(
+    scripts/root/.bashrc
+    'scripts/~/.config/htop/htoprc'
+  )
+
+  for file in "${files[@]}"; do
     mkdir -p "${tmp_dir}/$(dirname "${file}")"
     curl -fsSL "${RAW_BASE_URL}/${file}" -o "${tmp_dir}/${file}" \
       || die "Failed to download ${RAW_BASE_URL}/${file}"
@@ -403,33 +419,49 @@ start_redis_nodes() {
 
 print_helpers() {
   local announce_ip="$1"
+  local port node_lines="" service_units="" port_list="" create_endpoints=""
+  local last_port="${PORTS[-1]}"
+
+  for port in "${PORTS[@]}"; do
+    node_lines+="  ${announce_ip}:${port}"$'\n'
+    service_units+="redis-${port} "
+    port_list+="${port} "
+    create_endpoints+="${announce_ip}:${port} "
+  done
+  service_units="${service_units% }"
+  port_list="${port_list% }"
+  create_endpoints="${create_endpoints% }"
 
   cat <<EOF
 
 Redis node services are installed and running on:
-  ${announce_ip}:7000
-  ${announce_ip}:7001
-  ${announce_ip}:7002
-  ${announce_ip}:7003
-
+${node_lines}
 Helper commands:
 
   # Check local node status
-  systemctl status redis-7000 redis-7001 redis-7002 redis-7003 --no-pager
-  redis-cli -p 7000 cluster nodes
+  systemctl status ${service_units} --no-pager
+  redis-cli -p ${PORTS[0]} cluster nodes
+EOF
 
-  # Create a new 4-master cluster on this VM only
-  redis-cli --cluster create ${announce_ip}:7000 ${announce_ip}:7001 ${announce_ip}:7002 ${announce_ip}:7003 --cluster-replicas 0
+  if ((${#PORTS[@]} >= 3)); then
+    cat <<EOF
 
-  # Add these 4 nodes to an existing cluster
+  # Create a new ${#PORTS[@]}-master cluster on this VM only
+  redis-cli --cluster create ${create_endpoints} --cluster-replicas 0
+EOF
+  fi
+
+  cat <<EOF
+
+  # Add these ${#PORTS[@]} node(s) to an existing cluster
   EXISTING_CLUSTER_IP="<existing-cluster-ip>"
   ADD_NODE_DELAY_SECONDS=3
-  for PORT in 7000 7001 7002 7003; do
+  for PORT in ${port_list}; do
     if ! redis-cli --cluster add-node ${announce_ip}:\${PORT} "\${EXISTING_CLUSTER_IP}:7000"; then
       echo "Failed to add ${announce_ip}:\${PORT}; stopping."
       break
     fi
-    [[ "\${PORT}" == "7003" ]] || sleep "\${ADD_NODE_DELAY_SECONDS}"
+    [[ "\${PORT}" == "${last_port}" ]] || sleep "\${ADD_NODE_DELAY_SECONDS}"
   done
 
   # Rebalance quickly after adding empty masters
@@ -463,6 +495,13 @@ main() {
   fi
 
   require_root
+
+  [[ "${NODE_COUNT}" =~ ^[1-4]$ ]] || die "NODE_COUNT must be an integer between 1 and 4 (got: ${NODE_COUNT})."
+  local i
+  for ((i = 0; i < NODE_COUNT; i++)); do
+    PORTS+=("$((BASE_PORT + i))")
+  done
+  log "Installing ${NODE_COUNT} Redis node(s) on ports: ${PORTS[*]}"
 
   if [[ $# -eq 1 ]]; then
     announce_ip="$1"
