@@ -278,13 +278,11 @@ configure_time_and_shell_helpers() {
 
   touch "${target_home}/.inputrc"
   grep -Fqx '"\C-h": backward-kill-word' "${target_home}/.inputrc" || echo '"\C-h": backward-kill-word' >>"${target_home}/.inputrc"
-  grep -Fqx '"\C-?": backward-kill-word' "${target_home}/.inputrc" || echo '"\C-?": backward-kill-word' >>"${target_home}/.inputrc"
-  grep -Fqx '"\e[3;5~": backward-kill-word' "${target_home}/.inputrc" || echo '"\e[3;5~": backward-kill-word' >>"${target_home}/.inputrc"
+  grep -Fqx '"\C-?": backward-delete-char' "${target_home}/.inputrc" || echo '"\C-?": backward-delete-char' >>"${target_home}/.inputrc"
+  grep -Fqx '"\e[3~": delete-char' "${target_home}/.inputrc" || echo '"\e[3~": delete-char' >>"${target_home}/.inputrc"
+  grep -Fqx '"\e[3;5~": kill-word' "${target_home}/.inputrc" || echo '"\e[3;5~": kill-word' >>"${target_home}/.inputrc"
 
-  touch "${target_home}/.tmux.conf"
-  grep -Fqx 'bind-key -n C-h send-keys C-w' "${target_home}/.tmux.conf" || echo 'bind-key -n C-h send-keys C-w' >>"${target_home}/.tmux.conf"
-
-  chown "${target_user}:${target_user}" "${target_home}/.nanorc" "${target_home}/.inputrc" "${target_home}/.tmux.conf" 2>/dev/null || true
+  chown "${target_user}:${target_user}" "${target_home}/.nanorc" "${target_home}/.inputrc" 2>/dev/null || true
 }
 
 prepare_source_tree() {
@@ -455,7 +453,7 @@ EOF
 
   # Add these ${#PORTS[@]} node(s) to an existing cluster
   EXISTING_CLUSTER_IP="<existing-cluster-ip>"
-  ADD_NODE_DELAY_SECONDS=3
+  ADD_NODE_DELAY_SECONDS=2
   for PORT in ${port_list}; do
     if ! redis-cli --cluster add-node ${announce_ip}:\${PORT} "\${EXISTING_CLUSTER_IP}:7000"; then
       echo "Failed to add ${announce_ip}:\${PORT}; stopping."
