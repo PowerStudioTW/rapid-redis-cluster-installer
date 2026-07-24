@@ -17,5 +17,8 @@ Type=notify
 # 固定 CPU
 CPUAffinity=4
 
+# 禁用 Swap
+MemorySwapMax=0
+
 [Install]
 WantedBy=multi-user.target

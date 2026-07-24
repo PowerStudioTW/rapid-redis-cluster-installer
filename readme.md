@@ -69,7 +69,7 @@ sudo ufw allow from <trusted-ip>
 
 - 安裝必要工具，包括 `curl`、`ufw`、`chrony`、`htop`
 - 安裝 Redis `6:8.8.0-1rl1~noble1`，並 `apt-mark hold redis redis-server redis-tools`
-- 停用並 mask 預設 `redis-server`
+- 停用預設 `redis-server` 服務，並移除其 systemd unit 與 init script（保留 `/usr/bin/redis-server` 執行檔供各 node 使用）
 - 依 `NODE_COUNT` 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
 - 依 `NODE_COUNT` 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`

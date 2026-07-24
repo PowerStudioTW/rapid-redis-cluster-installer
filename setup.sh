@@ -173,7 +173,10 @@ install_redis() {
   apt-mark hold redis redis-server redis-tools
 
   systemctl disable --now redis-server 2>/dev/null || true
-  systemctl mask redis-server 2>/dev/null || true
+  rm -f /etc/systemd/system/redis-server.service \
+    /lib/systemd/system/redis-server.service \
+    /etc/init.d/redis-server
+  systemctl daemon-reload
 }
 
 configure_thp() {
