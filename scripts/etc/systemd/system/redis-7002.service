@@ -14,9 +14,6 @@ StartLimitBurst=3
 LimitNOFILE=65535
 Type=notify
 
-# 固定 CPU
-CPUAffinity=4
-
 # 禁用 Swap
 MemorySwapMax=0
 
