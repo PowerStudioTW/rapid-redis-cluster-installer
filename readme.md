@@ -1,6 +1,6 @@
-# Redis Cluster 8.8.0 一行安裝
+# Redis Cluster 8.8.1 一行安裝
 
-在新的 VM 上執行一行指令，即可安裝 Redis `8.8.0`、鎖定 APT 版本，並啟動最多 4 個 Redis Cluster node（預設 4 個，可用 `NODE_COUNT` 指定 1～4 個，port 從 `7000` 開始連號）：
+在新的 VM 上執行一行指令，即可安裝 Redis `8.8.1`、鎖定 APT 版本，並啟動最多 4 個 Redis Cluster node（預設 4 個，可用 `NODE_COUNT` 指定 1～4 個，port 從 `7000` 開始連號）：
 
 - `7000`
 - `7001`
@@ -45,10 +45,22 @@ UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NOD
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env PRIVATE_CIDR="10.0.0.0/16" bash
 ```
 
+預設會保留 Ubuntu 的自動安全性更新，但保證不會重啟 Redis node、也不會自動重開機（見「自動更新與 Redis 重啟」）。如果你的環境有自己的 patch 流程，可以整個關掉：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env AUTO_SECURITY_UPDATE=0 bash
+```
+
 不希望安裝後自動重開機：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env SKIP_REBOOT=1 bash
+```
+
+安裝其他 Redis 版本時，只需要給上游版本號（預設 `8.8.1`），腳本會自己從 APT 找出這台 VM 架構對應的完整套件版本（例如 `6:8.8.1-1rl1~noble1`）；找不到時會列出可用版本並停止安裝：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env REDIS_VERSION=8.8.1 bash
 ```
 
 `REDIS_CLUSTER_RAW_BASE` 是進階覆寫參數。遠端執行時，`setup.sh` 還需要下載 repo 內的 Redis config 與 systemd unit；這個參數用來指定那些檔案的 GitHub Raw base URL。官方 repo URL 已經內建在腳本中，正常安裝不需要設定它。只有從 fork、其他 branch 或測試來源安裝時才需要覆寫：
@@ -68,7 +80,7 @@ sudo ufw allow from <trusted-ip>
 `setup.sh` 會執行：
 
 - 安裝必要工具，包括 `curl`、`ufw`、`chrony`、`htop`
-- 安裝 Redis `6:8.8.0-1rl1~noble1`，並 `apt-mark hold redis redis-server redis-tools`
+- 依 VM 架構（`amd64` / `arm64`）設定 Redis APT repository，並自動比對出 Redis `8.8.1` 對應的套件版本（例如 `6:8.8.1-1rl1~noble1`）後安裝，再 `apt-mark hold redis redis-server redis-tools`
 - 停用預設 `redis-server` 服務，並移除其 systemd unit 與 init script（保留 `/usr/bin/redis-server` 執行檔供各 node 使用）
 - 依 `NODE_COUNT` 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
 - 依 `NODE_COUNT` 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
@@ -78,8 +90,35 @@ sudo ufw allow from <trusted-ip>
 - 複製完成後比對 `.bashrc` 與 `htoprc` 內容，驗證失敗會停止安裝
 - 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
 - 啟動 `redis-7000` 起連號的 node（預設到 `redis-7003`）
-- 設定 THP、UFW、sysctl、chrony、logrotate timer、apt daily timer、needrestart
+- 設定 THP、UFW、sysctl、chrony、logrotate timer
+- 設定 needrestart 與 unattended-upgrades，讓安全性更新不會重啟 Redis node
 - 完成後列出 helper 指令，並排程 1 分鐘後重開機
+
+## 自動更新與 Redis 重啟
+
+這些 node 是純 cache（`save ""`、`appendonly no`），重啟等於該 node 的資料全部消失，所以安裝時會把「重啟」這條路徑關掉，而不是把「更新」關掉。
+
+會重啟 Redis 的來源其實只有這些：
+
+- **needrestart**：`apt` 跑完後掃描還在使用舊 library（openssl、glibc 等）的行程，重啟對應的 systemd unit。它不看 unit 屬於哪個套件，所以自建的 `redis-70xx.service` 一樣會被重啟。**這是最常見的兇手。**
+- **unattended-upgrades 自動重開機**：kernel 更新後整台重開。
+- **`redis-server` 套件本身被升級**：只會重啟套件自帶的 `redis-server.service`（已移除），且套件已 `apt-mark hold`，`packages.redis.io` 也不在 unattended-upgrades 的 allowed origins 內。
+
+`setup.sh` 對應的處理：
+
+- `/etc/needrestart/needrestart.conf` 改成 `$nrconf{restart} = 'l'`（只列出、不重啟）
+- `/etc/needrestart/conf.d/99-redis-cluster.conf` 再明確排除 `redis-\d+\.service` 與 `/usr/bin/redis-server`，即使主設定檔日後被套件更新覆蓋也還在
+- `/etc/apt/apt.conf.d/99-redis-cluster.conf` 關閉 `Unattended-Upgrade::Automatic-Reboot`，並把 redis 套件加入 `Package-Blacklist`
+- `/etc/apt/apt.conf.d/20auto-upgrades` 保留安全性更新（`AUTO_SECURITY_UPDATE=0` 可關閉）
+
+代價是安全性更新裝好後不會生效，要自己排維護窗口重啟。隨時可以查目前欠了什麼：
+
+```bash
+needrestart -b -r l
+cat /var/run/reboot-required 2>/dev/null || echo "no reboot pending"
+```
+
+要真正做到「重啟不痛」，還是得讓每個 master 在**不同 VM** 上有 replica（目前 helper 用的是 `--cluster-replicas 0`），這樣才能一台一台滾動重啟。
 
 ## Helper 指令
 

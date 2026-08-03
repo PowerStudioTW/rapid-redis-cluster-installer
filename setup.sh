@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REDIS_VERSION="${REDIS_VERSION:-6:8.8.0-1rl1~noble1}"
+REDIS_VERSION="${REDIS_VERSION:-8.8.1}"
+REDIS_PKG_VERSION=""
 NODE_COUNT="${NODE_COUNT:-4}"
+AUTO_SECURITY_UPDATE="${AUTO_SECURITY_UPDATE:-1}"
 BASE_PORT=7000
 PORTS=()
 DEFAULT_RAW_BASE_URL="https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master"
@@ -30,7 +32,8 @@ The VM private IP is detected automatically. Pass [vm-private-ip] only to overri
 Optional environment variables:
   NODE_COUNT=<1-4>            (default 4; installs nodes on ports 7000..700N)
   PRIVATE_CIDR=<custom-private-cidr>
-  REDIS_VERSION=6:8.8.0-1rl1~noble1
+  REDIS_VERSION=8.8.1             (upstream version; the exact APT build is resolved automatically)
+  AUTO_SECURITY_UPDATE=0          (default 1; unattended security updates never restart Redis)
   SKIP_REBOOT=1
   REDIS_CLUSTER_SKIP_IP_BIND_CHECK=1
 EOF
@@ -129,11 +132,11 @@ install_prerequisites() {
   export DEBIAN_FRONTEND=noninteractive
 
   apt-get update
-  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop
+  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop unattended-upgrades
 }
 
 configure_redis_apt_repo() {
-  local codename
+  local codename arch
 
   codename="$(
     . /etc/os-release
@@ -143,33 +146,62 @@ configure_redis_apt_repo() {
     codename="$(lsb_release -cs)"
   fi
 
-  log "Configuring Redis APT repository for ${codename}."
+  arch="$(dpkg --print-architecture)"
+  case "${arch}" in
+    amd64 | arm64) ;;
+    *) die "Unsupported architecture: ${arch}. packages.redis.io publishes amd64 and arm64 builds only." ;;
+  esac
+
+  log "Configuring Redis APT repository for ${codename} (${arch})."
   install -d -m 0755 /etc/apt/keyrings
   curl -fsSL https://packages.redis.io/gpg | gpg --dearmor >/etc/apt/keyrings/redis-archive-keyring.gpg.tmp
   mv /etc/apt/keyrings/redis-archive-keyring.gpg.tmp /etc/apt/keyrings/redis-archive-keyring.gpg
   chmod 0644 /etc/apt/keyrings/redis-archive-keyring.gpg
 
   cat >/etc/apt/sources.list.d/redis.list <<EOF
-deb [signed-by=/etc/apt/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${codename} main
+deb [arch=${arch} signed-by=/etc/apt/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${codename} main
 EOF
 
   apt-get update
+}
 
-  if ! apt-cache madison redis-server | awk '{print $3}' | grep -Fxq "${REDIS_VERSION}"; then
-    apt-cache madison redis-server >&2 || true
-    die "Redis package version ${REDIS_VERSION} is not available from APT on this OS codename (${codename})."
+# Turns a plain upstream version (8.8.1) into the exact APT version string for this
+# codename/architecture (for example 6:8.8.1-1rl1~noble1). A full APT version string
+# is also accepted and used as-is.
+resolve_redis_package_version() {
+  local requested="$1"
+  local available escaped resolved
+
+  available="$(apt-cache madison redis-server 2>/dev/null | awk -F'|' '{gsub(/[[:space:]]/, "", $2); if ($2 != "") print $2}')"
+  [[ -n "${available}" ]] || die "apt-cache madison redis-server returned no candidate versions."
+
+  if grep -Fxq "${requested}" <<<"${available}"; then
+    printf '%s\n' "${requested}"
+    return
   fi
+
+  escaped="${requested//./\\.}"
+  resolved="$(grep -E -m1 "^([0-9]+:)?${escaped}(-|\$)" <<<"${available}" || true)"
+  if [[ -z "${resolved}" ]]; then
+    log "Available redis-server versions:"
+    printf '%s\n' "${available}" >&2
+    die "Redis ${requested} is not available from APT for this OS codename/architecture."
+  fi
+
+  printf '%s\n' "${resolved}"
 }
 
 install_redis() {
-  log "Installing Redis ${REDIS_VERSION} and locking package versions."
   export DEBIAN_FRONTEND=noninteractive
 
+  REDIS_PKG_VERSION="$(resolve_redis_package_version "${REDIS_VERSION}")"
+  log "Installing Redis ${REDIS_VERSION} (package version ${REDIS_PKG_VERSION}) and locking package versions."
+
   apt-mark unhold redis redis-server redis-tools 2>/dev/null || true
-  apt-get install -y \
-    "redis=${REDIS_VERSION}" \
-    "redis-server=${REDIS_VERSION}" \
-    "redis-tools=${REDIS_VERSION}"
+  apt-get install -y --allow-downgrades \
+    "redis=${REDIS_PKG_VERSION}" \
+    "redis-server=${REDIS_PKG_VERSION}" \
+    "redis-tools=${REDIS_PKG_VERSION}"
   apt-mark hold redis redis-server redis-tools
 
   systemctl disable --now redis-server 2>/dev/null || true
@@ -240,17 +272,65 @@ EOF
   done </etc/sysctl.d/99-redis-cluster.conf
 }
 
-configure_needrestart_and_timers() {
-  log "Configuring service restart and timer behavior."
+# apt 跑完後，needrestart 會掃描還在使用舊 library 的行程，並重啟對應的 systemd
+# unit。它不看 unit 屬於哪個套件，所以這裡自建的 redis-70xx.service 一樣會被重啟。
+# 這些 node 沒有 RDB/AOF，重啟等於整個 node 的資料消失，因此明確禁止。
+configure_needrestart() {
+  log "Configuring needrestart to never restart Redis nodes."
 
   if [[ -f /etc/needrestart/needrestart.conf ]]; then
     sed -i "s/^#\?\$nrconf{restart}.*/\$nrconf{restart} = 'l';/" /etc/needrestart/needrestart.conf
   fi
 
-  systemctl stop apt-daily.timer 2>/dev/null || true
-  systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
-  systemctl disable apt-daily.timer 2>/dev/null || true
-  systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
+  # 用 conf.d 再釘一次，避免主設定檔日後被套件更新覆蓋。
+  # 這裡用「單一 key 指派」與 push，而不是整個 hash/array 重新賦值，
+  # 否則會蓋掉 needrestart 自帶的預設值（dbus、sudo 等）。
+  install -d -m 0755 /etc/needrestart/conf.d
+  cat >/etc/needrestart/conf.d/99-redis-cluster.conf <<'EOF'
+# Managed by rapid-redis-cluster-installer.
+# List outdated services instead of restarting them.
+$nrconf{restart} = 'l';
+# Never restart the Redis cluster nodes, whatever triggered the apt run.
+$nrconf{override_rc}{qr(^redis-\d+\.service$)} = 0;
+push @{$nrconf{blacklist}}, qr(^/usr/bin/redis-server(\.dpkg-new)?$);
+EOF
+}
+
+# 保留安全性更新，但禁止它重開機；redis 套件則完全排除在自動更新之外。
+configure_auto_updates() {
+  cat >/etc/apt/apt.conf.d/99-redis-cluster.conf <<'EOF'
+// Managed by rapid-redis-cluster-installer.
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+Unattended-Upgrade::Package-Blacklist {
+  "redis";
+  "redis-server";
+  "redis-tools";
+};
+EOF
+
+  if [[ "${AUTO_SECURITY_UPDATE}" != "1" ]]; then
+    log "AUTO_SECURITY_UPDATE=0: disabling unattended upgrades."
+    cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+    systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    return
+  fi
+
+  log "Enabling unattended security updates (no service restart, no auto reboot)."
+  cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+}
+
+configure_timers() {
+  log "Configuring logrotate timer."
 
   mkdir -p /etc/systemd/system/logrotate.timer.d
   cat >/etc/systemd/system/logrotate.timer.d/override.conf <<'EOF'
@@ -442,6 +522,10 @@ Helper commands:
   # Check local node status
   systemctl status ${service_units} --no-pager
   redis-cli -p ${PORTS[0]} cluster nodes
+
+  # Check what a security update left pending (nothing is restarted automatically)
+  needrestart -b -r l
+  cat /var/run/reboot-required 2>/dev/null || echo "no reboot pending"
 EOF
 
   if ((${#PORTS[@]} >= 3)); then
@@ -523,7 +607,9 @@ main() {
   configure_thp
   configure_firewall "${private_cidr}"
   configure_kernel
-  configure_needrestart_and_timers
+  configure_needrestart
+  configure_auto_updates
+  configure_timers
   configure_time_and_shell_helpers
 
   source_tree="$(prepare_source_tree)"
