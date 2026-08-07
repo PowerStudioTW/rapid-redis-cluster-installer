@@ -1,6 +1,6 @@
 # Redis Cluster 8.8.1 一行安裝
 
-在新的 VM 上執行一行指令，即可安裝 Redis `8.8.1`、鎖定 APT 版本，並啟動最多 4 個 Redis Cluster node（預設 4 個，可用 `NODE_COUNT` 指定 1～4 個，port 從 `7000` 開始連號）：
+在新的 VM 上執行一行指令，即可安裝 Redis `8.8.1`、鎖定 APT 版本，並啟動最多 8 個 Redis Cluster node（預設 4 個，可用 `NODE_COUNT` 指定 1～8 個，port 從 `7000` 開始連號）。預設安裝的 4 個 node：
 
 - `7000`
 - `7001`
@@ -19,7 +19,7 @@
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo bash
 ```
 
-`setup.sh` 會優先取得預設路由使用的 RFC1918 內網 IP；若沒有預設路由來源，則在本機只有一個內網 IP 時使用該 IP。偵測成功後，會把安裝的 `/etc/redis/redis-7000.conf`～`redis-7003.conf`（依 `NODE_COUNT` 而定）的 `cluster-announce-ip` 全部改成該 IP。
+`setup.sh` 會優先取得預設路由使用的 RFC1918 內網 IP；若沒有預設路由來源，則在本機只有一個內網 IP 時使用該 IP。偵測成功後，會把安裝的 `/etc/redis/redis-7000.conf` 起連號的 conf（依 `NODE_COUNT` 而定，預設到 `redis-7003.conf`）的 `cluster-announce-ip` 全部改成該 IP。
 
 如果 VM 有多個內網 IP 且無法安全判斷，安裝會停止。此時可在指令最後手動指定：
 
@@ -31,13 +31,21 @@ curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-i
 
 ## 可選設定
 
-預設安裝 4 個 node（`7000`～`7003`）。如果這台 VM 只需要部分 node，可用 `NODE_COUNT` 指定數量（1～4），port 一律從 `7000` 開始連號。例如只裝 2 個 node（`7000`、`7001`）：
+預設安裝 4 個 node（`7000`～`7003`）。可用 `NODE_COUNT` 指定數量（1～8），port 一律從 `7000` 開始連號。例如只裝 2 個 node（`7000`、`7001`）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env NODE_COUNT=2 bash
 ```
 
-UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NODE_COUNT=2` 時只開 `7000:7001` 與 `17000:17001`）。
+或在大台 VM 上裝滿 8 個 node（`7000`～`7007`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env NODE_COUNT=8 bash
+```
+
+UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NODE_COUNT=2` 時只開 `7000:7001` 與 `17000:17001`，`NODE_COUNT=8` 時開 `7000:7007` 與 `17000:17007`）。
+
+每個 node 的 conf 都把 server 釘在 CPU `2i`、bio / aof-rewrite / bgsave 釘在 CPU `2i+1`，所以 N 個 node 需要 2N 個 CPU（8 個 node 需要 16 vCPU），記憶體則是每個 node `maxmemory 12.5GB`。CPU 數量不足時安裝不會中止，只會印出警告，該 node 會以未綁定 CPU 的狀態啟動。
 
 如果內網不是 `/24`，可以在同一行指定允許的來源網段：
 

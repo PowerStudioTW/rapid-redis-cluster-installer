@@ -30,7 +30,7 @@ Remote GitHub raw install:
 The VM private IP is detected automatically. Pass [vm-private-ip] only to override it.
 
 Optional environment variables:
-  NODE_COUNT=<1-4>            (default 4; installs nodes on ports 7000..700N)
+  NODE_COUNT=<1-8>            (default 4; installs nodes on ports 7000..700N)
   PRIVATE_CIDR=<custom-private-cidr>
   REDIS_VERSION=8.8.1             (upstream version; the exact APT build is resolved automatically)
   AUTO_SECURITY_UPDATE=0          (default 1; unattended security updates never restart Redis)
@@ -125,6 +125,20 @@ check_ip_bound_to_host() {
   if ! ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "${ip}"; then
     die "${ip} is not configured on this VM. Pass this VM's private IP, or set REDIS_CLUSTER_SKIP_IP_BIND_CHECK=1 if you know what you are doing."
   fi
+}
+
+# 每個 node 的 conf 都把 server 釘在 CPU 2i、bio/aof/bgsave 釘在 CPU 2i+1，
+# 所以 N 個 node 需要 2N 個 CPU。CPU 不夠時 Redis 只會在啟動時記一筆 affinity
+# 警告然後照常跑（沒有釘住），不會啟動失敗，因此這裡也只提醒、不中止安裝。
+check_cpu_budget() {
+  local required_cpus host_cpus
+  required_cpus=$((NODE_COUNT * 2))
+  host_cpus="$(nproc 2>/dev/null || true)"
+
+  [[ "${host_cpus}" =~ ^[0-9]+$ ]] || return 0
+  ((host_cpus < required_cpus)) || return 0
+
+  log "Warning: NODE_COUNT=${NODE_COUNT} pins nodes to CPU 0-$((required_cpus - 1)) (2 CPUs per node), but this VM has only ${host_cpus} CPU(s). Those nodes will start unpinned."
 }
 
 install_prerequisites() {
@@ -581,12 +595,13 @@ main() {
 
   require_root
 
-  [[ "${NODE_COUNT}" =~ ^[1-4]$ ]] || die "NODE_COUNT must be an integer between 1 and 4 (got: ${NODE_COUNT})."
+  [[ "${NODE_COUNT}" =~ ^[1-8]$ ]] || die "NODE_COUNT must be an integer between 1 and 8 (got: ${NODE_COUNT})."
   local i
   for ((i = 0; i < NODE_COUNT; i++)); do
     PORTS+=("$((BASE_PORT + i))")
   done
   log "Installing ${NODE_COUNT} Redis node(s) on ports: ${PORTS[*]}"
+  check_cpu_budget
 
   if [[ $# -eq 1 ]]; then
     announce_ip="$1"
