@@ -272,6 +272,7 @@ configure_firewall() {
 configure_kernel() {
   log "Configuring kernel/network parameters."
   cat >/etc/sysctl.d/99-redis-cluster.conf <<'EOF'
+vm.overcommit_memory=1
 net.core.somaxconn=65535
 net.ipv4.tcp_max_syn_backlog=262144
 net.ipv4.tcp_fin_timeout=15
