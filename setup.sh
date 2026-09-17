@@ -147,6 +147,11 @@ install_prerequisites() {
 
   apt-get update
   apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop unattended-upgrades
+
+  log "Removing mtd-utils."
+  apt-get purge -y mtd-utils
+  apt-get autoremove --purge -y
+  hash -r
 }
 
 configure_redis_apt_repo() {
