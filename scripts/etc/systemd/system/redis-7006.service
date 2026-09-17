@@ -14,6 +14,9 @@ StartLimitBurst=3
 LimitNOFILE=65535
 Type=notify
 
+# 固定 CPU (防止redis.conf漏網的 thread 跑到別的 node 的 CPU)
+CPUAffinity=12 13
+
 # 禁用 Swap
 MemorySwapMax=0
 
