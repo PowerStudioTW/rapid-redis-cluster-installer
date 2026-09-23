@@ -4,6 +4,8 @@ set -Eeuo pipefail
 REDIS_VERSION="${REDIS_VERSION:-8.8.1}"
 REDIS_PKG_VERSION=""
 NODE_COUNT="${NODE_COUNT:-4}"
+MAXMEMORY_GB="${MAXMEMORY_GB:-12.5}"
+MAXMEMORY_BYTES=""
 AUTO_SECURITY_UPDATE="${AUTO_SECURITY_UPDATE:-1}"
 BASE_PORT=7000
 PORTS=()
@@ -31,6 +33,7 @@ The VM private IP is detected automatically. Pass [vm-private-ip] only to overri
 
 Optional environment variables:
   NODE_COUNT=<1-8>            (default 4; installs nodes on ports 7000..700N)
+  MAXMEMORY_GB=<GB>           (default 12.5; maxmemory of each node, decimals allowed)
   PRIVATE_CIDR=<custom-private-cidr>
   REDIS_VERSION=8.8.1             (upstream version; the exact APT build is resolved automatically)
   AUTO_SECURITY_UPDATE=0          (default 1; unattended security updates never restart Redis)
@@ -389,13 +392,18 @@ configure_time_and_shell_helpers() {
 }
 
 prepare_source_tree() {
-  local script_dir tmp_dir file port
-  local -a files=()
+  local script_dir tmp_dir file
+  local -a files=(
+    scripts/etc/redis/redis-700N.conf
+    scripts/etc/systemd/system/redis-700N.service
+    scripts/root/.bashrc
+    'scripts/~/.config/htop/htoprc'
+  )
 
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)"
   if [[ -n "${script_dir}" \
-    && -d "${script_dir}/scripts/etc/redis" \
-    && -d "${script_dir}/scripts/etc/systemd/system" \
+    && -f "${script_dir}/scripts/etc/redis/redis-700N.conf" \
+    && -f "${script_dir}/scripts/etc/systemd/system/redis-700N.service" \
     && -f "${script_dir}/scripts/root/.bashrc" \
     && -f "${script_dir}/scripts/~/.config/htop/htoprc" ]]; then
     printf '%s\n' "${script_dir}/scripts"
@@ -408,17 +416,6 @@ prepare_source_tree() {
   RAW_BASE_URL="${RAW_BASE_URL%/}"
   log "Downloading scripts/ from ${RAW_BASE_URL}."
 
-  for port in "${PORTS[@]}"; do
-    files+=(
-      "scripts/etc/redis/redis-${port}.conf"
-      "scripts/etc/systemd/system/redis-${port}.service"
-    )
-  done
-  files+=(
-    scripts/root/.bashrc
-    'scripts/~/.config/htop/htoprc'
-  )
-
   for file in "${files[@]}"; do
     mkdir -p "${tmp_dir}/$(dirname "${file}")"
     curl -fsSL "${RAW_BASE_URL}/${file}" -o "${tmp_dir}/${file}" \
@@ -428,28 +425,52 @@ prepare_source_tree() {
   printf '%s\n' "${tmp_dir}/scripts"
 }
 
+# 由 port 算出 node 的各項設定，把範本裡的 __REDIS_*__ 佔位符換成實際值：
+#   第 i 個 node（port = 7000 + i）的 server 釘在 CPU 2i、bio/aof/bgsave 釘在 CPU 2i+1，
+#   cluster bus port 則是 port + 10000。
+render_node_template() {
+  local template="$1"
+  local output="$2"
+  local port="$3"
+  local announce_ip="$4"
+  local index=$((port - BASE_PORT))
+
+  sed \
+    -e "s/__REDIS_PORT__/${port}/g" \
+    -e "s/__REDIS_BUS_PORT__/$((port + 10000))/g" \
+    -e "s/__REDIS_SERVER_CPU__/$((index * 2))/g" \
+    -e "s/__REDIS_BACKGROUND_CPU__/$((index * 2 + 1))/g" \
+    -e "s/__REDIS_MAXMEMORY__/${MAXMEMORY_BYTES}/g" \
+    -e "s/__REDIS_CLUSTER_ANNOUNCE_IP__/${announce_ip}/g" \
+    "${template}" >"${output}"
+
+  if grep -q '__REDIS_[A-Z_]*__' "${output}"; then
+    die "Unresolved placeholder left in ${output}: $(grep -o -m1 '__REDIS_[A-Z_]*__' "${output}")"
+  fi
+}
+
 install_redis_node_files() {
   local announce_ip="$1"
   local source_tree="$2"
+  local conf_template="${source_tree}/etc/redis/redis-700N.conf"
+  local service_template="${source_tree}/etc/systemd/system/redis-700N.service"
   local work_dir port conf service
+
+  [[ -f "${conf_template}" ]] || die "Missing ${conf_template}"
+  [[ -f "${service_template}" ]] || die "Missing ${service_template}"
+  grep -Eq '^cluster-announce-ip ' "${conf_template}" || die "${conf_template} does not define cluster-announce-ip"
 
   log "Installing Redis node configs and systemd units."
   work_dir="$(mktemp -d)"
-  cp -a "${source_tree}/etc/redis" "${work_dir}/redis"
-  cp -a "${source_tree}/etc/systemd" "${work_dir}/systemd"
 
   install -d -m 0755 /etc/redis
 
   for port in "${PORTS[@]}"; do
-    conf="${work_dir}/redis/redis-${port}.conf"
-    service="${work_dir}/systemd/system/redis-${port}.service"
+    conf="${work_dir}/redis-${port}.conf"
+    service="${work_dir}/redis-${port}.service"
 
-    [[ -f "${conf}" ]] || die "Missing ${conf}"
-    [[ -f "${service}" ]] || die "Missing ${service}"
-
-    grep -Eq '^cluster-announce-ip ' "${conf}" || die "${conf} does not define cluster-announce-ip"
-    sed -i -E "s/^cluster-announce-ip .*/cluster-announce-ip ${announce_ip}/" "${conf}"
-    sed -i -E "s|^dir .*|dir /var/lib/redis/${port}|" "${conf}"
+    render_node_template "${conf_template}" "${conf}" "${port}" "${announce_ip}"
+    render_node_template "${service_template}" "${service}" "${port}" "${announce_ip}"
 
     install -d -o redis -g redis -m 0750 "/var/lib/redis/${port}"
     install -m 0644 -o root -g root "${conf}" "/etc/redis/redis-${port}.conf"
@@ -606,7 +627,11 @@ main() {
   for ((i = 0; i < NODE_COUNT; i++)); do
     PORTS+=("$((BASE_PORT + i))")
   done
-  log "Installing ${NODE_COUNT} Redis node(s) on ports: ${PORTS[*]}"
+  # Redis 的 maxmemory 不吃小數（12.5gb 會被拒絕），所以這裡先換算成 bytes 再寫進 conf。
+  [[ "${MAXMEMORY_GB}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "MAXMEMORY_GB must be a positive number of GB, for example 12.5 (got: ${MAXMEMORY_GB})."
+  MAXMEMORY_BYTES="$(awk -v gb="${MAXMEMORY_GB}" 'BEGIN { printf "%.0f", gb * 1024 * 1024 * 1024 }')"
+  ((MAXMEMORY_BYTES > 0)) || die "MAXMEMORY_GB must be greater than 0 (got: ${MAXMEMORY_GB})."
+  log "Installing ${NODE_COUNT} Redis node(s) on ports: ${PORTS[*]} (maxmemory ${MAXMEMORY_GB}GB = ${MAXMEMORY_BYTES} bytes each)"
   check_cpu_budget
 
   if [[ $# -eq 1 ]]; then

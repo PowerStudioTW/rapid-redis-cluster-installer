@@ -45,7 +45,13 @@ curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-i
 
 UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NODE_COUNT=2` 時只開 `7000:7001` 與 `17000:17001`，`NODE_COUNT=8` 時開 `7000:7007` 與 `17000:17007`）。
 
-每個 node 的 conf 都把 server 釘在 CPU `2i`、bio / aof-rewrite / bgsave 釘在 CPU `2i+1`，所以 N 個 node 需要 2N 個 CPU（8 個 node 需要 16 vCPU），記憶體則是每個 node `maxmemory 12.5GB`。CPU 數量不足時安裝不會中止，只會印出警告，該 node 會以未綁定 CPU 的狀態啟動。
+每個 node 的 conf 都把 server 釘在 CPU `2i`、bio / aof-rewrite / bgsave 釘在 CPU `2i+1`，所以 N 個 node 需要 2N 個 CPU（8 個 node 需要 16 vCPU）。CPU 數量不足時安裝不會中止，只會印出警告，該 node 會以未綁定 CPU 的狀態啟動。
+
+每個 node 的 `maxmemory` 預設 `12.5` GB，可用 `MAXMEMORY_GB` 調整（單位 GB、可帶小數，安裝時換算成 bytes 寫進 conf）。VM 總記憶體至少要能容納 `NODE_COUNT × MAXMEMORY_GB` 再加上系統與連線 buffer 的餘裕。例如在 32GB 的 VM 上裝 2 個 node、每個 12GB：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master/setup.sh | sudo env NODE_COUNT=2 MAXMEMORY_GB=12 bash
+```
 
 如果內網不是 `/24`，可以在同一行指定允許的來源網段：
 
@@ -90,13 +96,14 @@ sudo ufw allow from <trusted-ip>
 - 安裝必要工具，包括 `curl`、`ufw`、`chrony`、`htop`
 - 依 VM 架構（`amd64` / `arm64`）設定 Redis APT repository，並自動比對出 Redis `8.8.1` 對應的套件版本（例如 `6:8.8.1-1rl1~noble1`）後安裝，再 `apt-mark hold redis redis-server redis-tools`
 - 停用預設 `redis-server` 服務，並移除其 systemd unit 與 init script（保留 `/usr/bin/redis-server` 執行檔供各 node 使用）
-- 依 `NODE_COUNT` 將 `scripts/etc/redis/redis-700*.conf` 安裝到 `/etc/redis/`
-- 依 `NODE_COUNT` 將 `scripts/etc/systemd/system/redis-700*.service` 安裝到 `/etc/systemd/system/`
+- 依 `NODE_COUNT` 用範本 `scripts/etc/redis/redis-700N.conf` 為每個 port 產生 `/etc/redis/redis-<port>.conf`
+- 依 `NODE_COUNT` 用範本 `scripts/etc/systemd/system/redis-700N.service` 為每個 port 產生 `/etc/systemd/system/redis-<port>.service`
+- 範本內的佔位符在安裝時依 port 即時算出：`__REDIS_PORT__`（port）、`__REDIS_BUS_PORT__`（port + 10000）、`__REDIS_SERVER_CPU__`（`2i`）、`__REDIS_BACKGROUND_CPU__`（`2i+1`），其中 `i = port - 7000`；`__REDIS_MAXMEMORY__` 則是 `MAXMEMORY_GB` 換算的 bytes；資料目錄為 `/var/lib/redis/<port>`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
 - 將 `scripts/~/.config/htop/htoprc` 安裝到 `/root/.config/htop/htoprc`
 - 若透過 `sudo` 執行，再將 `htoprc` 複製到原登入使用者的家目錄
 - 複製完成後比對 `.bashrc` 與 `htoprc` 內容，驗證失敗會停止安裝
-- 把 `cluster-announce-ip __REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
+- 把範本內的 `__REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
 - 啟動 `redis-7000` 起連號的 node（預設到 `redis-7003`）
 - 設定 THP、UFW、sysctl、chrony、logrotate timer
 - 設定 needrestart 與 unattended-upgrades，讓安全性更新不會重啟 Redis node

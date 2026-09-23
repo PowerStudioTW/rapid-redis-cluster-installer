@@ -1,12 +1,12 @@
 [Unit]
-Description=Redis Node on port 7002
+Description=Redis Node on port __REDIS_PORT__
 After=network.target
 
 [Service]
 User=redis
 Group=redis
-ExecStart=/usr/bin/redis-server /etc/redis/redis-7002.conf
-ExecStop=/usr/bin/redis-cli -p 7002 shutdown
+ExecStart=/usr/bin/redis-server /etc/redis/redis-__REDIS_PORT__.conf
+ExecStop=/usr/bin/redis-cli -p __REDIS_PORT__ shutdown
 Restart=on-failure
 RestartSec=3
 StartLimitInterval=60
@@ -15,7 +15,7 @@ LimitNOFILE=65535
 Type=notify
 
 # 固定 CPU (防止redis.conf漏網的 thread 跑到別的 node 的 CPU)
-CPUAffinity=4 5
+CPUAffinity=__REDIS_SERVER_CPU__ __REDIS_BACKGROUND_CPU__
 
 # 禁用 Swap
 MemorySwapMax=0
