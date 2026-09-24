@@ -9,6 +9,9 @@ MAXMEMORY_BYTES=""
 AUTO_SECURITY_UPDATE="${AUTO_SECURITY_UPDATE:-1}"
 BASE_PORT=7000
 PORTS=()
+CPU_COUNT=""
+CPU_LAYOUT=""
+SHARED_CPU_COUNT=""
 DEFAULT_RAW_BASE_URL="https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-installer/master"
 RAW_BASE_URL="${REDIS_CLUSTER_RAW_BASE:-$DEFAULT_RAW_BASE_URL}"
 
@@ -130,18 +133,53 @@ check_ip_bound_to_host() {
   fi
 }
 
-# 每個 node 的 conf 都把 server 釘在 CPU 2i、bio/aof/bgsave 釘在 CPU 2i+1，
-# 所以 N 個 node 需要 2N 個 CPU。CPU 不夠時 Redis 只會在啟動時記一筆 affinity
-# 警告然後照常跑（沒有釘住），不會啟動失敗，因此這裡也只提醒、不中止安裝。
-check_cpu_budget() {
-  local required_cpus host_cpus
-  required_cpus=$((NODE_COUNT * 2))
-  host_cpus="$(nproc 2>/dev/null || true)"
+# 依 VM 的 CPU 是不是 HT（SMT）決定每個 node 的 CPU 配置：
+#   ht：第 i 個 node 的 server 釘在 CPU 2i、bio/aof/bgsave 釘在 CPU 2i+1，systemd 再用
+#       CPUAffinity 釘住兩顆，所以 N 個 node 需要 2N 個 CPU。CPU 不夠時 Redis 只會在啟動時
+#       記一筆 affinity 警告然後照常跑（沒有釘住），因此這裡也只提醒、不中止安裝。
+#   physical：最後 N 顆核心各給一個 node 的 server，前面 CPU 數 - N 顆核心共用給所有 node 的
+#       bio/aof/bgsave 與網卡中斷（網卡 queue 數也降為同樣數量），並拿掉 systemd 的 CPUAffinity。
+# 讀不到 CPU topology 時無法判斷，沿用 ht 配置（也就是原本的設定）。
+detect_cpu_layout() {
+  local siblings
 
-  [[ "${host_cpus}" =~ ^[0-9]+$ ]] || return 0
-  ((host_cpus < required_cpus)) || return 0
+  CPU_COUNT="$(nproc)"
+  siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
 
-  log "Warning: NODE_COUNT=${NODE_COUNT} pins nodes to CPU 0-$((required_cpus - 1)) (2 CPUs per node), but this VM has only ${host_cpus} CPU(s). Those nodes will start unpinned."
+  if [[ -z "${siblings}" ]]; then
+    log "Warning: cannot read the CPU topology; assuming hyper-threaded CPUs."
+    CPU_LAYOUT="ht"
+  elif [[ "${siblings}" == *[,-]* ]]; then
+    CPU_LAYOUT="ht"
+  else
+    CPU_LAYOUT="physical"
+  fi
+
+  if [[ "${CPU_LAYOUT}" == "ht" ]]; then
+    log "CPU layout: hyper-threaded, ${CPU_COUNT} vCPU(s). Node i pins its server to CPU 2i and background jobs to CPU 2i+1."
+    if ((CPU_COUNT < NODE_COUNT * 2)); then
+      log "Warning: NODE_COUNT=${NODE_COUNT} pins nodes to CPU 0-$((NODE_COUNT * 2 - 1)) (2 CPUs per node), but this VM has only ${CPU_COUNT} CPU(s). Those nodes will start unpinned."
+    fi
+    return
+  fi
+
+  SHARED_CPU_COUNT=$((CPU_COUNT - NODE_COUNT))
+  ((SHARED_CPU_COUNT >= 1)) \
+    || die "This VM has ${CPU_COUNT} physical core(s) without hyper-threading. Each node needs its own core plus at least 1 shared core, so NODE_COUNT must be at most $((CPU_COUNT - 1)) (got: ${NODE_COUNT})."
+
+  log "CPU layout: physical cores (no hyper-threading), ${CPU_COUNT} CPU(s). Servers on CPU $(cpu_range "${SHARED_CPU_COUNT}" "$((CPU_COUNT - 1))"); background jobs and NIC IRQs on CPU $(cpu_range 0 "$((SHARED_CPU_COUNT - 1))")."
+}
+
+# 把連續的 CPU 編號寫成 Redis cpulist / taskset 的格式，例如 0-3，只有一顆時寫 0。
+cpu_range() {
+  local first="$1"
+  local last="$2"
+
+  if ((first == last)); then
+    printf '%s\n' "${first}"
+  else
+    printf '%s-%s\n' "${first}" "${last}"
+  fi
 }
 
 install_prerequisites() {
@@ -149,7 +187,7 @@ install_prerequisites() {
   export DEBIAN_FRONTEND=noninteractive
 
   apt-get update
-  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop unattended-upgrades
+  apt-get install -y ca-certificates curl gnupg lsb-release ufw chrony htop ethtool unattended-upgrades
 
   log "Removing mtd-utils."
   apt-get purge -y mtd-utils
@@ -396,18 +434,22 @@ prepare_source_tree() {
   local -a files=(
     scripts/etc/redis/redis-700N.conf
     scripts/etc/systemd/system/redis-700N.service
+    scripts/etc/systemd/system/nic-irq-pin.service
+    scripts/usr/local/sbin/nic-irq-pin.sh
     scripts/root/.bashrc
     'scripts/~/.config/htop/htoprc'
   )
 
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)"
-  if [[ -n "${script_dir}" \
-    && -f "${script_dir}/scripts/etc/redis/redis-700N.conf" \
-    && -f "${script_dir}/scripts/etc/systemd/system/redis-700N.service" \
-    && -f "${script_dir}/scripts/root/.bashrc" \
-    && -f "${script_dir}/scripts/~/.config/htop/htoprc" ]]; then
-    printf '%s\n' "${script_dir}/scripts"
-    return
+  if [[ -n "${script_dir}" ]]; then
+    local has_all_files=1
+    for file in "${files[@]}"; do
+      [[ -f "${script_dir}/${file}" ]] || has_all_files=0
+    done
+    if ((has_all_files)); then
+      printf '%s\n' "${script_dir}/scripts"
+      return
+    fi
   fi
 
   [[ -n "${RAW_BASE_URL}" ]] || die "Cannot find local scripts/. Set REDIS_CLUSTER_RAW_BASE to the GitHub raw base URL."
@@ -425,28 +467,51 @@ prepare_source_tree() {
   printf '%s\n' "${tmp_dir}/scripts"
 }
 
-# 由 port 算出 node 的各項設定，把範本裡的 __REDIS_*__ 佔位符換成實際值：
-#   第 i 個 node（port = 7000 + i）的 server 釘在 CPU 2i、bio/aof/bgsave 釘在 CPU 2i+1，
-#   cluster bus port 則是 port + 10000。
+# 用 sed 參數把範本裡的 __XXX__ 佔位符換成實際值；換完還有殘留就中止，避免裝上壞掉的設定。
+render_template() {
+  local template="$1"
+  local output="$2"
+  shift 2
+
+  [[ -f "${template}" ]] || die "Missing ${template}"
+  sed "$@" "${template}" >"${output}"
+
+  if grep -Eq '__[A-Z][A-Z_]*__' "${output}"; then
+    die "Unresolved placeholder left in ${output}: $(grep -Eo -m1 '__[A-Z][A-Z_]*__' "${output}")"
+  fi
+}
+
+# 由 port 算出 node 的各項設定（第 i 個 node 的 port = 7000 + i，cluster bus port = port + 10000）。
+# CPU 配置依 detect_cpu_layout 的結果：
+#   ht：server 在 CPU 2i、bio/aof/bgsave 在 CPU 2i+1，systemd CPUAffinity 釘住這兩顆。
+#   physical：server 在最後 N 顆核心中的第 i 顆，bio/aof/bgsave 共用前面的核心，
+#             並移除 systemd 的 CPUAffinity（否則 process 會被限制在 CPUAffinity 那幾顆）。
 render_node_template() {
   local template="$1"
   local output="$2"
   local port="$3"
   local announce_ip="$4"
   local index=$((port - BASE_PORT))
+  local server_cpu background_cpus
+  local -a layout_args=()
 
-  sed \
+  if [[ "${CPU_LAYOUT}" == "physical" ]]; then
+    server_cpu=$((SHARED_CPU_COUNT + index))
+    background_cpus="$(cpu_range 0 "$((SHARED_CPU_COUNT - 1))")"
+    layout_args=(-e '/^# 固定 CPU/d' -e '/^CPUAffinity=/d')
+  else
+    server_cpu=$((index * 2))
+    background_cpus=$((index * 2 + 1))
+  fi
+
+  render_template "${template}" "${output}" \
+    "${layout_args[@]}" \
     -e "s/__REDIS_PORT__/${port}/g" \
     -e "s/__REDIS_BUS_PORT__/$((port + 10000))/g" \
-    -e "s/__REDIS_SERVER_CPU__/$((index * 2))/g" \
-    -e "s/__REDIS_BACKGROUND_CPU__/$((index * 2 + 1))/g" \
+    -e "s/__REDIS_SERVER_CPU__/${server_cpu}/g" \
+    -e "s/__REDIS_BACKGROUND_CPU__/${background_cpus}/g" \
     -e "s/__REDIS_MAXMEMORY__/${MAXMEMORY_BYTES}/g" \
-    -e "s/__REDIS_CLUSTER_ANNOUNCE_IP__/${announce_ip}/g" \
-    "${template}" >"${output}"
-
-  if grep -q '__REDIS_[A-Z_]*__' "${output}"; then
-    die "Unresolved placeholder left in ${output}: $(grep -o -m1 '__REDIS_[A-Z_]*__' "${output}")"
-  fi
+    -e "s/__REDIS_CLUSTER_ANNOUNCE_IP__/${announce_ip}/g"
 }
 
 install_redis_node_files() {
@@ -457,7 +522,6 @@ install_redis_node_files() {
   local work_dir port conf service
 
   [[ -f "${conf_template}" ]] || die "Missing ${conf_template}"
-  [[ -f "${service_template}" ]] || die "Missing ${service_template}"
   grep -Eq '^cluster-announce-ip ' "${conf_template}" || die "${conf_template} does not define cluster-announce-ip"
 
   log "Installing Redis node configs and systemd units."
@@ -476,6 +540,47 @@ install_redis_node_files() {
     install -m 0644 -o root -g root "${conf}" "/etc/redis/redis-${port}.conf"
     install -m 0644 -o root -g root "${service}" "/etc/systemd/system/redis-${port}.service"
   done
+}
+
+# 只有非 HT VM 才做：網卡 combined queue 數設為「CPU 數 - node 數」，中斷釘在前面那幾顆共用核心，
+# 並裝成開機執行的 nic-irq-pin.service（ethtool -L 與 IRQ affinity 重開機後都會還原）。
+# irqbalance 會把 IRQ affinity 改回去、阿里雲的 ecs_mq 會在開機時把 queue 數調回最大，所以兩個都關掉。
+configure_nic_irq_pinning() {
+  local announce_ip="$1"
+  local source_tree="$2"
+  local iface work_dir port redis_units="" last_shared_cpu
+
+  [[ "${CPU_LAYOUT}" == "physical" ]] || return 0
+
+  iface="$(ip -4 -o addr show | awk -v ip="${announce_ip}" '{split($4, a, "/"); if (a[1] == ip) {print $2; exit}}')"
+  if [[ -z "${iface}" ]]; then
+    iface="$(ip -4 route show default | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
+  fi
+  [[ -n "${iface}" ]] || die "Cannot find the network interface for ${announce_ip}."
+
+  last_shared_cpu=$((SHARED_CPU_COUNT - 1))
+  for port in "${PORTS[@]}"; do
+    redis_units+="redis-${port}.service "
+  done
+
+  log "Pinning ${iface} to ${SHARED_CPU_COUNT} combined queue(s) with IRQs on CPU $(cpu_range 0 "${last_shared_cpu}")."
+  systemctl disable --now irqbalance 2>/dev/null || true
+  systemctl disable --now ecs_mq 2>/dev/null || true
+
+  work_dir="$(mktemp -d)"
+  render_template "${source_tree}/usr/local/sbin/nic-irq-pin.sh" "${work_dir}/nic-irq-pin.sh" \
+    -e "s/__NIC_IFACE__/${iface}/g" \
+    -e "s/__NIC_CPUS__/$(seq -s ' ' 0 "${last_shared_cpu}")/g"
+  render_template "${source_tree}/etc/systemd/system/nic-irq-pin.service" "${work_dir}/nic-irq-pin.service" \
+    -e "s/__NIC_IFACE__/${iface}/g" \
+    -e "s/__NIC_CPU_RANGE__/$(cpu_range 0 "${last_shared_cpu}")/g" \
+    -e "s/__REDIS_UNITS__/${redis_units% }/g"
+
+  install -m 0755 -o root -g root "${work_dir}/nic-irq-pin.sh" /usr/local/sbin/nic-irq-pin.sh
+  install -m 0644 -o root -g root "${work_dir}/nic-irq-pin.service" /etc/systemd/system/nic-irq-pin.service
+  systemctl daemon-reload
+  systemctl enable nic-irq-pin.service
+  systemctl restart nic-irq-pin.service
 }
 
 install_shell_and_htop_files() {
@@ -632,7 +737,7 @@ main() {
   MAXMEMORY_BYTES="$(awk -v gb="${MAXMEMORY_GB}" 'BEGIN { printf "%.0f", gb * 1024 * 1024 * 1024 }')"
   ((MAXMEMORY_BYTES > 0)) || die "MAXMEMORY_GB must be greater than 0 (got: ${MAXMEMORY_GB})."
   log "Installing ${NODE_COUNT} Redis node(s) on ports: ${PORTS[*]} (maxmemory ${MAXMEMORY_GB}GB = ${MAXMEMORY_BYTES} bytes each)"
-  check_cpu_budget
+  detect_cpu_layout
 
   if [[ $# -eq 1 ]]; then
     announce_ip="$1"
@@ -662,6 +767,7 @@ main() {
   install_shell_and_htop_files "${source_tree}"
   check_redis_modules
   install_redis_node_files "${announce_ip}" "${source_tree}"
+  configure_nic_irq_pinning "${announce_ip}" "${source_tree}"
   start_redis_nodes
   print_helpers "${announce_ip}"
   schedule_reboot

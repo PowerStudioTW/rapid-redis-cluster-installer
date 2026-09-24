@@ -45,7 +45,22 @@ curl -fsSL https://raw.githubusercontent.com/PowerStudioTW/rapid-redis-cluster-i
 
 UFW 也只會開放對應數量的 Redis port 與 cluster bus port（例如 `NODE_COUNT=2` 時只開 `7000:7001` 與 `17000:17001`，`NODE_COUNT=8` 時開 `7000:7007` 與 `17000:17007`）。
 
-每個 node 的 conf 都把 server 釘在 CPU `2i`、bio / aof-rewrite / bgsave 釘在 CPU `2i+1`，所以 N 個 node 需要 2N 個 CPU（8 個 node 需要 16 vCPU）。CPU 數量不足時安裝不會中止，只會印出警告，該 node 會以未綁定 CPU 的狀態啟動。
+CPU 配置會依 VM 的 CPU 是否有 HT（hyper-threading / SMT）自動決定（讀 `/sys/devices/system/cpu/cpu0/topology/thread_siblings_list`，讀不到時視為 HT）：
+
+- **HT**：第 `i` 個 node（port `7000 + i`）的 server 釘在 CPU `2i`、bio / aof-rewrite / bgsave 釘在 CPU `2i+1`，systemd 的 `CPUAffinity` 也釘住這兩顆，所以 N 個 node 需要 2N 個 CPU（8 個 node 需要 16 vCPU）。CPU 數量不足時安裝不會中止，只會印出警告，該 node 會以未綁定 CPU 的狀態啟動。
+- **非 HT（實體核心）**：最後 N 顆核心各給一個 node 的 server，前面 `CPU 數 - N` 顆核心由所有 node 的 bio / aof-rewrite / bgsave 與網卡中斷共用，並移除 systemd 的 `CPUAffinity`。例如 8 核心、4 個 node：`7000`～`7003` 的 `server-cpulist` 分別是 `4`～`7`，其他 cpulist 都是 `0-3`，網卡 combined queue 設為 `4`、中斷釘在 CPU `0`～`3`。每個 node 需要一顆獨佔核心、再加至少一顆共用核心，所以 `NODE_COUNT` 最多是 `CPU 數 - 1`，超過會在安裝一開始就停止。
+
+非 HT 時網卡的設定由開機執行的 `nic-irq-pin.service` 維持（`ethtool -L` 與 IRQ affinity 重開機後都會還原），它會：
+
+- 把帶有 VM 內網 IP 的網卡 combined queue 數設為 `CPU 數 - N`（超過網卡上限時用上限）
+- 把各 queue 的中斷輪流釘在共用核心上，並關閉 RPS
+- 安裝時一併停用會改回設定的 `irqbalance` 與阿里雲的 `ecs_mq`
+
+```bash
+systemctl status nic-irq-pin --no-pager
+ethtool -l eth0
+grep -E 'virtio[0-9]+-(input|output)' /proc/interrupts
+```
 
 每個 node 的 `maxmemory` 預設 `12.5` GB，可用 `MAXMEMORY_GB` 調整（單位 GB、可帶小數，安裝時換算成 bytes 寫進 conf）。VM 總記憶體至少要能容納 `NODE_COUNT × MAXMEMORY_GB` 再加上系統與連線 buffer 的餘裕。例如在 32GB 的 VM 上裝 2 個 node、每個 12GB：
 
@@ -98,13 +113,14 @@ sudo ufw allow from <trusted-ip>
 - 停用預設 `redis-server` 服務，並移除其 systemd unit 與 init script（保留 `/usr/bin/redis-server` 執行檔供各 node 使用）
 - 依 `NODE_COUNT` 用範本 `scripts/etc/redis/redis-700N.conf` 為每個 port 產生 `/etc/redis/redis-<port>.conf`
 - 依 `NODE_COUNT` 用範本 `scripts/etc/systemd/system/redis-700N.service` 為每個 port 產生 `/etc/systemd/system/redis-<port>.service`
-- 範本內的佔位符在安裝時依 port 即時算出：`__REDIS_PORT__`（port）、`__REDIS_BUS_PORT__`（port + 10000）、`__REDIS_SERVER_CPU__`（`2i`）、`__REDIS_BACKGROUND_CPU__`（`2i+1`），其中 `i = port - 7000`；`__REDIS_MAXMEMORY__` 則是 `MAXMEMORY_GB` 換算的 bytes；資料目錄為 `/var/lib/redis/<port>`
+- 範本內的佔位符在安裝時依 port 即時算出：`__REDIS_PORT__`（port）、`__REDIS_BUS_PORT__`（port + 10000）、`__REDIS_SERVER_CPU__`、`__REDIS_BACKGROUND_CPU__`（依 HT / 非 HT 的 CPU 配置），其中 `i = port - 7000`；`__REDIS_MAXMEMORY__` 則是 `MAXMEMORY_GB` 換算的 bytes；資料目錄為 `/var/lib/redis/<port>`
 - 將 `scripts/root/.bashrc` 安裝到 `/root/.bashrc`
 - 將 `scripts/~/.config/htop/htoprc` 安裝到 `/root/.config/htop/htoprc`
 - 若透過 `sudo` 執行，再將 `htoprc` 複製到原登入使用者的家目錄
 - 複製完成後比對 `.bashrc` 與 `htoprc` 內容，驗證失敗會停止安裝
 - 把範本內的 `__REDIS_CLUSTER_ANNOUNCE_IP__` 替換成自動偵測或手動指定的 VM 內網 IP
 - 啟動 `redis-7000` 起連號的 node（預設到 `redis-7003`）
+- 非 HT VM：用 `scripts/usr/local/sbin/nic-irq-pin.sh` 與 `scripts/etc/systemd/system/nic-irq-pin.service` 範本安裝開機執行的網卡 queue / 中斷設定，並停用 `irqbalance`、`ecs_mq`
 - 設定 THP、UFW、sysctl、chrony、logrotate timer
 - 設定 needrestart 與 unattended-upgrades，讓安全性更新不會重啟 Redis node
 - 完成後列出 helper 指令，並排程 1 分鐘後重開機

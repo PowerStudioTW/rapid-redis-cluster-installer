@@ -1,0 +1,13 @@
+[Unit]
+Description=Pin __NIC_IFACE__ queues and IRQs to CPU __NIC_CPU_RANGE__ (off the Redis server cores)
+After=network-online.target
+Wants=network-online.target
+Before=__REDIS_UNITS__
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nic-irq-pin.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
